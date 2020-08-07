@@ -1,69 +1,66 @@
-#description	:a script to help monitor the devices connected to a network.
-#author     	:EBerlin
-#date		    :2020-07-31
-
-#The nmap utility needs root priveledges to see mac addresses. First we will check to make sure the user is root.
-
+#!/usr/bin/bash
+#title          :guestList.sh
+#description    :a script to help monitor the devices connected to a network.
+#prepared for   :CIS-2150 Intro to Linux | Professor Tyler Whitney
+#author         :Eric Berlin
+#date           :2020-07-3
+###Check if root access. It is needed to run the Nmap utility.This also makes it so that the log file can not be altered by someone without admin rights.
 if [[ $(/usr/bin/id -u) -ne 0 ]]; then
-    echo "You must be root."
+    echo "Operation failed. Are you root?" >&2 #error reporting to stderr
     exit
 fi
 
-if ! [[ -f .addrs.log  ]]; then
-	echo "Log file not found in current directory. Creating log file: .addrs.log"
-	touch .addrs.log
-else
-	echo "Log file found."
+###check if log file exists, make one if needed.
+if ! [[ -f '/var/log/macaddrs.log'  ]]; then
+    echo "Log file not found. Creating log file: '/var/log/macaddrs.log'" >&2 
+    touch '/var/log/macaddrs.log'
 fi
 
-newEntries=0
-#Run ifconfig. Pipe the output to grep. Keep the broadcast IP addresses only.
-for OUTPUT in $(ifconfig | grep -P -o '(?<=broadcast\ )([0-9]{1,3}[\.]){3}[0-9]{1,3}')
+###make and populate temporary file of subnets
+interfacestemp=$(mktemp)
+ifconfig | grep -P -o '(?<=broadcast\ )([0-9]{1,3}[\.]){3}[0-9]{1,3}'>"$interfacestemp"
+sed -i 's/255/0/g' "$interfacestemp"
 
-#Scan each IP range...
-	do
-		#Instantiate the "slash" variable. We will use it later. 
+###main
+
+#run through the interfacetemp temp file and...
+cat "$interfacestemp" | while read -r _interface ; #basically 'for line in file', or in this case, 'for ipaddr in file'... 	
+    do
+
+        ###prepare input for nmap
 		slash=32
-		#announce the range being scanned
-		echo "Scanning ${OUTPUT//255/0}..."
-		#Replace any "255" with "0"
-		IPRANGE="${OUTPUT//255/0}" 
-		#Read each of those IP addresses into its own array, delimited by the . character.
-		IFS='.' read -ra  ARR<<<"$IPRANGE"
-			#For each entry in the array...
-			for i in ${ARR[@]}
+		echo "Scanning address range starting at: $_interface..."
+		IFS='.' read -ra  _addr_as_arr<<<"$_interface"
+			for i in ${_addr_as_arr[@]};
 				do
-						#If the entry is 0, it means that it was masked. Decrease the slash variable to increase the range of addresses that nmap will search.
-						echo "look at ${ARR[@]}" 
-						if [ $i == 0 ]; then
+					if [ $i == 0 ];
+						then
 							((slash-=8))
-						fi
+					fi
 				done
 		
-		###working to this line###
+        #prepare timestamp variable:
+		timeStamp=`date +%F_%T`
+		neverBeforeSeen=$(mktemp)
 
-		#Using the variables from above as arguments, run nmap. The options here dictate that the scan should deal with pings but not ports. 
-		list=($(nmap -sn -P $IPRANGE\/$slash | grep -P -o '(?<=MAC\ Address\:\ )([0-9A-F]{2}[\:]){5}([0-9A-F]{2})' ))
-
-		echo $list
-		for range in $list
+        #run nmap, alter log as needed.
+		nmapOut="`nmap -sn -P $_interface\/$slash`"
+        echo "$nmapOut"
+		_devices="`echo $nmapOut | grep -P -o '(?<=MAC\ Address\:\ )([0-9A-F]{2}[\:]){5}([0-9A-F]{2})'`"
+		for device in $_devices;
 			do
-				timeNow=`date +%F_%T`
-				echo "time is $timeNow"
-				for addr in  ${list[@]} 
-					do
-						if ! grep -q ${addr[@]} .addrs.log; then
-							echo ${addr[@]}, $timeNow, $timeNow >> .addrs.log 
-							echo "New entry added to log file."
-							newEntries+=1
-						else
-							perl -pe 's/(?<='${addr[@]}'\,\ .{21}).{19}/'$timeNow'/g' .addrs.log
-							echo "Entry updated in log file."
-						fi
-					done
+				if grep -q $device '/var/log/macaddrs.log' ;
+					then
+                        #update timeStamp. This line was kind of a nightmare, but I got it to work, and I'm very happy with it.
+						perl -p -i.orig -e 's/(?<='$device', [0-9]{4}-[0-9]{2}-[0-9]{2}_([0-9]{2}:){2}[0-9]{2}, ).*/'$timeStamp'/g' '/var/log/macaddrs.log'
+					else
+                        #add the new device to log and grab its data from nmapOut var from earlier
+                        echo $device, $timeStamp, $timeStamp >> '/var/log/macaddrs.log'
+                        #TODO. These data need to be parsed and saved outside of this loop, to create the alert message that will be shown later.
+					    $_device_data_raw+="`echo $nmapOut | grep -B 3 $device`"
+                fi
 			done
 	done
-if [[ $newEntries>=0 ]]; then
-	notify-send -u normal "$newEntries new entries added to .addrs.log at `date +%T`"\
-		"You should probably look into that."
-fi
+
+# cleanup
+rm "$interfacestemp"
